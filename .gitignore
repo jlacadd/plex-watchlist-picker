@@ -1,0 +1,6 @@
+data/
+plex-watchlist-config.json
+plex-watchlist-runtime-cache.json
+__pycache__/
+*.pyc
+.env
