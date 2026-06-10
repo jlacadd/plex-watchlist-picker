@@ -1,0 +1,9 @@
+services:
+  plex-watchlist-picker:
+    build: .
+    container_name: plex-watchlist-picker
+    ports:
+      - "8787:8787"
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
