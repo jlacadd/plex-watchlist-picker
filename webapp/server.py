@@ -1,6 +1,7 @@
 import json
 import math
 import os
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -141,17 +142,27 @@ def save_json(path, value):
 def parse_time_limit(value):
     text = (value or "").strip().lower()
     if not text:
-        raise ValueError("Enter a time like 90, 1:30, or 2h.")
-    if ":" in text:
-        hours, minutes = text.split(":", 1)
-        return int(hours) * 60 + int(minutes)
-    if text.endswith(("hours", "hour", "hrs", "hr", "h")):
-        number = "".join(ch for ch in text if ch.isdigit() or ch == ".")
-        return math.floor(float(number) * 60)
-    if text.endswith(("minutes", "minute", "mins", "min", "m")):
-        number = "".join(ch for ch in text if ch.isdigit())
-        return int(number)
-    return int(text)
+        raise ValueError("Enter a time like 90, 1:30, 1h 32m, or 2h.")
+
+    colon_match = re.fullmatch(r"(\d+)\s*:\s*([0-5]?\d)", text)
+    if colon_match:
+        return int(colon_match.group(1)) * 60 + int(colon_match.group(2))
+
+    mixed_match = re.fullmatch(
+        r"(?:(\d+(?:\.\d+)?)\s*(?:h|hr|hrs|hour|hours))?\s*"
+        r"(?:(\d+)\s*(?:m|min|mins|minute|minutes))?",
+        text,
+    )
+    if mixed_match and (mixed_match.group(1) or mixed_match.group(2)):
+        hours = float(mixed_match.group(1) or 0)
+        minutes = int(mixed_match.group(2) or 0)
+        return math.floor(hours * 60) + minutes
+
+    minutes_match = re.fullmatch(r"\d+", text)
+    if minutes_match:
+        return int(text)
+
+    raise ValueError("Enter a time like 90, 1:30, 1h 32m, or 2h.")
 
 
 def format_runtime(minutes):
@@ -328,3 +339,4 @@ if __name__ == "__main__":
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     print(f"Plex Movie Picker listening on port {PORT}")
     server.serve_forever()
+
