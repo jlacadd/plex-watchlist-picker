@@ -3,6 +3,7 @@ import math
 import os
 import re
 import time
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -15,6 +16,7 @@ from pathlib import Path
 CONFIG_PATH = Path(os.environ.get("CONFIG_PATH", "/data/config.json"))
 CACHE_PATH = Path(os.environ.get("CACHE_PATH", "/data/runtime-cache.json"))
 PORT = int(os.environ.get("PORT", "8787"))
+FETCH_LOCK = threading.Lock()
 
 
 INDEX_HTML = """<!doctype html>
@@ -79,13 +81,23 @@ INDEX_HTML = """<!doctype html>
         const row = document.createElement('article');
         row.className = 'movie';
         row.innerHTML = `
-          <div class="runtime">${movie.runtime}</div>
+          <div class="runtime"></div>
           <div>
             <div class="title"></div>
             <div class="meta"></div>
           </div>
-          <a href="${movie.plexUrl}" target="_blank" rel="noreferrer">Open</a>
+          <a target="_blank" rel="noopener noreferrer">Open</a>
         `;
+        row.querySelector('.runtime').textContent = movie.runtime;
+        const link = row.querySelector('a');
+        try {
+          const url = new URL(movie.plexUrl);
+          if (url.protocol === 'https:' && url.hostname === 'watch.plex.tv' && !url.username && !url.password) {
+            link.href = url.href;
+          } else {
+            link.remove();
+          }
+        } catch { link.remove(); }
         row.querySelector('.title').textContent = movie.title;
         row.querySelector('.meta').textContent = movie.year || '';
         resultsEl.appendChild(row);
@@ -141,6 +153,8 @@ def save_json(path, value):
 
 def parse_time_limit(value):
     text = (value or "").strip().lower()
+    if len(text) > 64:
+        raise ValueError("Time value is too long.")
     if not text:
         raise ValueError("Enter a time like 90, 1:30, 1h 32m, or 2h.")
 
@@ -171,10 +185,18 @@ def format_runtime(minutes):
     return f"{hours}h {remainder:02d}m"
 
 
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise urllib.error.URLError("Upstream redirects are not allowed.")
+
+
 def http_get(url, headers=None):
     request = urllib.request.Request(url, headers=headers or {})
-    with urllib.request.urlopen(request, timeout=20) as response:
-        return response.read()
+    with urllib.request.build_opener(NoRedirect).open(request, timeout=20) as response:
+        body = response.read(4 * 1024 * 1024 + 1)
+        if len(body) > 4 * 1024 * 1024:
+            raise RuntimeError("Upstream response is too large.")
+        return body
 
 
 def get_plex_movies(config):
@@ -195,6 +217,8 @@ def get_plex_movies(config):
     movies = []
 
     while True:
+        if start >= 10000:
+            raise RuntimeError("Watchlist exceeds the supported size.")
         headers = {
             "X-Plex-Token": token,
             "X-Plex-Container-Start": str(start),
@@ -295,7 +319,24 @@ def make_payload(limit_minutes):
 
 
 class Handler(BaseHTTPRequestHandler):
+    server_version = "MoviePicker"
+    sys_version = ""
+
+    def setup(self):
+        super().setup()
+        self.connection.settimeout(15)
+
+    def end_headers(self):
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Cache-Control", "no-store")
+        super().end_headers()
+
     def do_GET(self):
+        if self.headers.get("Sec-Fetch-Site") == "cross-site":
+            self.send_error(403)
+            return
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path == "/":
             self.send_text(INDEX_HTML, "text/html; charset=utf-8")
@@ -313,10 +354,18 @@ class Handler(BaseHTTPRequestHandler):
         query = urllib.parse.parse_qs(parsed.query)
         try:
             limit = parse_time_limit(query.get("time", ["120"])[0])
-            payload = make_payload(limit)
+            if not FETCH_LOCK.acquire(blocking=False):
+                self.send_json({"error": "Watchlist is busy. Try again shortly."}, status=503)
+                return
+            try:
+                payload = make_payload(limit)
+            finally:
+                FETCH_LOCK.release()
             self.send_json(payload)
-        except (ValueError, RuntimeError, urllib.error.URLError, ET.ParseError) as exc:
-            self.send_json({"error": str(exc)}, status=400)
+        except ValueError:
+            self.send_json({"error": "Enter a valid time such as 90 or 1:30."}, status=400)
+        except (RuntimeError, OSError, ET.ParseError):
+            self.send_json({"error": "Unable to load the watchlist. Check server configuration and Plex availability."}, status=502)
 
     def send_json(self, payload, status=200):
         body = json.dumps(payload).encode("utf-8")
@@ -335,8 +384,32 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
+class BoundedHTTPServer(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def __init__(self, *args, **kwargs):
+        self.slots = threading.BoundedSemaphore(16)
+        super().__init__(*args, **kwargs)
+
+    def process_request(self, request, client_address):
+        if not self.slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self.slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self.slots.release()
+
+
 if __name__ == "__main__":
-    server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
+    server = BoundedHTTPServer(("0.0.0.0", PORT), Handler)
     print(f"Plex Movie Picker listening on port {PORT}")
     server.serve_forever()
 

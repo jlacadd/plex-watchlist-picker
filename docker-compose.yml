@@ -7,3 +7,9 @@ services:
     volumes:
       - ./data:/data
     restart: unless-stopped
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: 256m

@@ -163,7 +163,8 @@ With:
 Then from the `getPlexWatchlistFits` folder:
 
 ```powershell
-docker compose up -d --build
+docker compose build --pull
+docker compose up -d
 ```
 
 Open:
@@ -171,6 +172,11 @@ Open:
 ```text
 http://NAS-IP:8787
 ```
+
+Keep this service on a trusted private network. It has no login; use an
+authenticated HTTPS reverse proxy before allowing access outside that network.
+Always rebuild with `--pull` to refresh Python and OS security patches. The
+build requires Python 3.12.16 or newer within the 3.12 series.
 
 In Docker Manager, create a Project from `docker-compose.yml`, or create a
 container with:
